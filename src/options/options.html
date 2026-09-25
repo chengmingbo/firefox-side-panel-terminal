@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Side Panel Terminal — Settings</title>
+    <link rel="stylesheet" href="../styles/common.css" />
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body class="spt-options">
+    <main class="spt-options-card">
+      <header>
+        <h1>Side Panel Terminal</h1>
+        <p class="spt-muted">Settings and helper installation.</p>
+      </header>
+
+      <section class="spt-install">
+        <h2>Native helper</h2>
+        <p>
+          The extension talks to a small Go binary on your machine over
+          Firefox's native messaging API. The install script writes the
+          JSON manifest Firefox expects.
+        </p>
+        <pre id="manifest-path" class="spt-code"></pre>
+        <div class="spt-actions">
+          <button id="install" class="spt-btn spt-btn-primary">Run install script</button>
+          <button id="uninstall" class="spt-btn spt-btn-ghost">Remove manifest</button>
+          <button id="test-conn" class="spt-btn">Test connection</button>
+          <span id="conn-result" class="spt-muted" aria-live="polite"></span>
+        </div>
+        <details>
+          <summary>Manual installation</summary>
+          <ol class="spt-manual">
+            <li>
+              Build the helper:
+              <code>./scripts/build-helper.sh</code>
+            </li>
+            <li>
+              Copy
+              <code>native/firefox_side_panel_terminal_host.json</code>
+              into Firefox's NativeMessagingHosts directory:
+              <ul>
+                <li>macOS: <code>~/Library/Application Support/Mozilla/NativeMessagingHosts/</code></li>
+                <li>Linux: <code>~/.mozilla/native-messaging-hosts/</code></li>
+                <li>Windows: registry key under <code>HKCU\Software\Mozilla\NativeMessagingHosts\firefox_side_panel_terminal_host</code></li>
+              </ul>
+            </li>
+            <li>
+              Replace <code>/ABSOLUTE/PATH/TO/firefox-side-panel-terminal-host</code>
+              in the manifest with the absolute path to the helper binary.
+            </li>
+            <li>Restart Firefox.</li>
+          </ol>
+        </details>
+      </section>
+
+      <form id="options-form" autocomplete="off">
+        <fieldset>
+          <legend>Shell</legend>
+
+          <label>
+            <span>Shell executable</span>
+            <input id="shell" name="shell" type="text" placeholder="(use $SHELL)" spellcheck="false" />
+            <small class="spt-muted">
+              Leave empty to use <code>$SHELL</code> on macOS/Linux, or
+              <code>powershell.exe</code> on Windows.
+            </small>
+          </label>
+
+          <label>
+            <span>Working directory</span>
+            <input id="cwd" name="cwd" type="text" placeholder="(use $HOME)" spellcheck="false" />
+          </label>
+
+          <label>
+            <span>Extra environment</span>
+            <textarea
+              id="env"
+              name="env"
+              rows="4"
+              placeholder="KEY=value&#10;ANOTHER=value"
+              spellcheck="false"
+            ></textarea>
+            <small class="spt-muted">One KEY=value per line. Lines starting with # are ignored.</small>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Terminal</legend>
+          <div class="spt-grid">
+            <label>
+              <span>Font size</span>
+              <input id="fontSize" name="fontSize" type="number" min="8" max="32" step="1" />
+            </label>
+            <label>
+              <span>Scrollback</span>
+              <input id="scrollback" name="scrollback" type="number" min="100" max="50000" step="100" />
+            </label>
+            <label class="spt-checkbox">
+              <input id="cursorBlink" name="cursorBlink" type="checkbox" />
+              <span>Cursor blink</span>
+            </label>
+          </div>
+          <label>
+            <span>Font family</span>
+            <input id="fontFamily" name="fontFamily" type="text" spellcheck="false" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Native messaging</legend>
+          <label>
+            <span>Helper host name</span>
+            <input id="nativeHostName" name="nativeHostName" type="text" spellcheck="false" />
+            <small class="spt-muted">
+              Must match the <code>name</code> field in the manifest.
+            </small>
+          </label>
+          <label>
+            <span>Helper path (informational)</span>
+            <input id="helperPath" name="helperPath" type="text" spellcheck="false" placeholder="/absolute/path/to/helper" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Appearance</legend>
+          <label>
+            <span>Sidebar theme</span>
+            <select id="theme" name="theme">
+              <option value="auto">Follow system</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
+        </fieldset>
+
+        <div class="spt-actions">
+          <button type="submit" class="spt-btn spt-btn-primary">Save</button>
+          <span id="saved" class="spt-muted" aria-live="polite"></span>
+        </div>
+      </form>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

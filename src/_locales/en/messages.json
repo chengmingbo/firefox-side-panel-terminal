@@ -1,0 +1,26 @@
+{
+  "extensionName": {
+    "message": "Side Panel Terminal",
+    "description": "Name of the extension."
+  },
+  "extensionShortName": {
+    "message": "Terminal",
+    "description": "Short name."
+  },
+  "extensionDescription": {
+    "message": "A real terminal in the Firefox sidebar. Spawns a shell on your machine (PTY) via a small native helper.",
+    "description": "Description."
+  },
+  "cmdToggleSidebar": {
+    "message": "Toggle side-panel terminal",
+    "description": "Toggle the sidebar."
+  },
+  "cmdNewSession": {
+    "message": "New terminal session",
+    "description": "New session."
+  },
+  "cmdDisconnect": {
+    "message": "Disconnect / reconnect helper",
+    "description": "Disconnect or reconnect."
+  }
+}

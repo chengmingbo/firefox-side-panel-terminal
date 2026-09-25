@@ -1,0 +1,9 @@
+{
+  "name": "firefox_side_panel_terminal_host",
+  "description": "Native messaging host for the Side Panel Terminal Firefox extension.",
+  "path": "/ABSOLUTE/PATH/TO/firefox-side-panel-terminal-host",
+  "type": "stdio",
+  "allowed_extensions": [
+    "firefox-side-panel-terminal@chengmingbo.github.io"
+  ]
+}
