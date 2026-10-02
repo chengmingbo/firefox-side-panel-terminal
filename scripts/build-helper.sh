@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # Build the Go helper binary.
 #
-# Usage:   ./scripts/build-helper.sh                # outputs to helper/firefox-side-panel-terminal-host
+# Usage:   ./scripts/build-helper.sh                # outputs to helper/firefox_side_panel_terminal_host
 #          ./scripts/build-helper.sh /path/to/out
 #
 # Honours $GOPROXY (defaults to https://proxy.golang.org,direct).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${1:-$ROOT/helper/firefox-side-panel-terminal-host}"
+OUT="${1:-$ROOT/helper/firefox_side_panel_terminal_host}"
 mkdir -p "$(dirname "$OUT")"
 
 if ! command -v go >/dev/null 2>&1; then
   echo "error: Go toolchain not found on PATH." >&2
-  echo "       Install Go 1.21+ from https://go.dev/dl/ and re-run." >&2
+  echo "       Install Go 1.23+ (e.g. `brew install go`) from https://go.dev/dl/ and re-run." >&2
   exit 1
 fi
 

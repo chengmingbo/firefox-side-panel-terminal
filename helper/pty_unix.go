@@ -1,4 +1,4 @@
-//go:build unix || darwin || linux
+//go:build unix
 
 package main
 
@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 )
@@ -19,17 +21,23 @@ type unixPtyBackend struct{}
 type unixPty struct {
 	master *os.File
 	cmd    *exec.Cmd
-	closed bool
+
+	closeOnce sync.Once
+	waitOnce  sync.Once
+	exited    chan struct{}
+	exitCode  int
 }
+
+// killGrace is how long a shell gets to exit after SIGHUP before SIGKILL.
+const killGrace = 2 * time.Second
 
 func (b *unixPtyBackend) Start(cols, rows int, shell string, args []string, cwd string, env []string) (PtyHandle, error) {
 	cmd := exec.Command(shell, args...)
 	cmd.Env = env
 	cmd.Dir = cwd
-	// Put the child in its own process group so a Ctrl-C in the terminal
-	// only kills the shell (and its children) — not the helper.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
+	// pty.Start sets Setsid+Setctty, so the shell leads its own session and
+	// process group (pgid == pid). Do not also set Setpgid: setpgid() on a
+	// session leader fails with EPERM and the fork/exec is rejected.
 	master, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Rows: uint16(rows),
 		Cols: uint16(cols),
@@ -37,46 +45,58 @@ func (b *unixPtyBackend) Start(cols, rows int, shell string, args []string, cwd 
 	if err != nil {
 		return nil, fmt.Errorf("pty.Start: %w", err)
 	}
-	return &unixPty{master: master, cmd: cmd}, nil
+	return &unixPty{master: master, cmd: cmd, exited: make(chan struct{})}, nil
 }
 
-func (p *unixPty) Write(data []byte) (int, error) {
-	if p.closed {
-		return 0, errors.New("pty closed")
-	}
-	return p.master.Write(data)
-}
-
-func (p *unixPty) Read(buf []byte) (int, error) {
-	if p.closed {
-		return 0, errors.New("pty closed")
-	}
-	return p.master.Read(buf)
-}
+func (p *unixPty) Write(data []byte) (int, error) { return p.master.Write(data) }
+func (p *unixPty) Read(buf []byte) (int, error)   { return p.master.Read(buf) }
 
 func (p *unixPty) Resize(cols, rows int) error {
-	if p.closed {
-		return nil
-	}
 	return pty.Setsize(p.master, &pty.Winsize{
 		Rows: uint16(rows),
 		Cols: uint16(cols),
 	})
 }
 
-func (p *unixPty) Close() error {
-	if p.closed {
-		return nil
-	}
-	p.closed = true
-	// Best-effort: kill the whole process group so any children go too.
-	if p.cmd != nil && p.cmd.Process != nil {
-		pgid, err := syscall.Getpgid(p.cmd.Process.Pid)
-		if err == nil {
-			_ = syscall.Kill(-pgid, syscall.SIGHUP)
+// Wait reaps the shell and returns its exit code (128+signal if killed).
+// Safe to call more than once.
+func (p *unixPty) Wait() int {
+	p.waitOnce.Do(func() {
+		err := p.cmd.Wait()
+		p.exitCode = 0
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+				p.exitCode = 128 + int(ws.Signal())
+			} else {
+				p.exitCode = ee.ExitCode()
+			}
+		} else if err != nil {
+			p.exitCode = -1
 		}
-		_ = p.cmd.Process.Kill()
-		_, _ = p.cmd.Process.Wait()
-	}
-	return p.master.Close()
+		close(p.exited)
+	})
+	return p.exitCode
 }
+
+// Close hangs up the shell's process group, closes the master side, and
+// escalates to SIGKILL if the group is still around after killGrace.
+// Safe to call more than once and concurrently with Read/Wait.
+func (p *unixPty) Close() error {
+	var err error
+	p.closeOnce.Do(func() {
+		pid := p.cmd.Process.Pid
+		_ = syscall.Kill(-pid, syscall.SIGHUP)
+		err = p.master.Close()
+		go func() {
+			select {
+			case <-p.exited:
+			case <-time.After(killGrace):
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+			}
+		}()
+	})
+	return err
+}
+
+func newUnixBackend() ptyBackend { return &unixPtyBackend{} }

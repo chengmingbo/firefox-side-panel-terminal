@@ -1,6 +1,7 @@
 # Go
 build/
 helper/firefox_side_panel_terminal_host
+helper/helper
 
 # Node
 node_modules/
