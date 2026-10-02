@@ -20,7 +20,7 @@
     "description": "New session."
   },
   "cmdDisconnect": {
-    "message": "Disconnect / reconnect helper",
+    "message": "Restart the terminal session",
     "description": "Disconnect or reconnect."
   }
 }

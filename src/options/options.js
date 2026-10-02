@@ -22,7 +22,6 @@ const fields = {
   scrollback: form.elements.scrollback,
   cursorBlink: form.elements.cursorBlink,
   nativeHostName: form.elements.nativeHostName,
-  helperPath: form.elements.helperPath,
   theme: form.elements.theme,
 };
 
@@ -45,7 +44,6 @@ const els = {
   fields.scrollback.value = cfg.scrollback;
   fields.cursorBlink.checked = cfg.cursorBlink;
   fields.nativeHostName.value = cfg.nativeHostName;
-  fields.helperPath.value = cfg.helperPath;
   fields.theme.value = cfg.theme;
 
   els.manifestPath.textContent = expectedManifestPath(cfg.nativeHostName);
@@ -61,29 +59,42 @@ els.install.addEventListener("click", async () => {
 });
 
 els.uninstall.addEventListener("click", async () => {
-  if (
-    !confirm(
-      "Remove the native messaging manifest? You'll need to re-run install.sh to use the terminal again."
-    )
-  ) {
-    return;
-  }
   await copyUninstallHint();
 });
 
 els.testConn.addEventListener("click", async () => {
   els.connResult.textContent = "Testing…";
+  const name = fields.nativeHostName.value.trim() || DEFAULT_NATIVE_HOST_NAME;
   try {
-    const resp = await browser.runtime.sendMessage({ type: "spt/ping-helper" });
-    if (resp && resp.ok) {
-      els.connResult.textContent = "OK — helper reachable.";
-    } else {
-      els.connResult.textContent = `Failed: ${(resp && resp.error) || "unknown"}`;
-    }
+    const version = await pingHelper(name);
+    els.connResult.textContent = `OK — helper ${version} reachable.`;
   } catch (e) {
     els.connResult.textContent = `Failed: ${e.message || e}`;
   }
 });
+
+// Start a throwaway helper, ask for its version, and shut it down.
+function pingHelper(name) {
+  return new Promise((resolve, reject) => {
+    const port = browser.runtime.connectNative(name);
+    const timer = setTimeout(() => {
+      port.disconnect();
+      reject(new Error("helper did not answer within 3s"));
+    }, 3000);
+    port.onMessage.addListener((m) => {
+      if (m && m.evt === "pong") {
+        clearTimeout(timer);
+        port.disconnect();
+        resolve(m.version || "(unknown version)");
+      }
+    });
+    port.onDisconnect.addListener((p) => {
+      clearTimeout(timer);
+      reject(new Error(p.error?.message || "helper exited"));
+    });
+    port.postMessage({ cmd: "ping" });
+  });
+}
 
 async function save() {
   const partial = {
@@ -96,7 +107,6 @@ async function save() {
     cursorBlink: fields.cursorBlink.checked,
     nativeHostName:
       fields.nativeHostName.value.trim() || DEFAULT_NATIVE_HOST_NAME,
-    helperPath: fields.helperPath.value.trim(),
     theme: fields.theme.value || DEFAULT_THEME,
   };
   await setConfig(partial);
@@ -131,7 +141,7 @@ async function copyInstallHint() {
   const hint =
     "Run this in a terminal:\n\n" +
     "  ./scripts/install.sh\n\n" +
-    "The script builds the helper (Go 1.21+ required) and writes the manifest.";
+    "The script builds the helper (Go 1.23+ required) and writes the manifest.";
   await navigator.clipboard.writeText(hint).catch(() => {});
   flash("Install command copied to clipboard.");
 }

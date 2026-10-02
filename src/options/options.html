@@ -22,8 +22,8 @@
         </p>
         <pre id="manifest-path" class="spt-code"></pre>
         <div class="spt-actions">
-          <button id="install" class="spt-btn spt-btn-primary">Run install script</button>
-          <button id="uninstall" class="spt-btn spt-btn-ghost">Remove manifest</button>
+          <button id="install" class="spt-btn spt-btn-primary">Copy install command</button>
+          <button id="uninstall" class="spt-btn spt-btn-ghost">Copy uninstall command</button>
           <button id="test-conn" class="spt-btn">Test connection</button>
           <span id="conn-result" class="spt-muted" aria-live="polite"></span>
         </div>
@@ -114,10 +114,6 @@
             <small class="spt-muted">
               Must match the <code>name</code> field in the manifest.
             </small>
-          </label>
-          <label>
-            <span>Helper path (informational)</span>
-            <input id="helperPath" name="helperPath" type="text" spellcheck="false" placeholder="/absolute/path/to/helper" />
           </label>
         </fieldset>
 

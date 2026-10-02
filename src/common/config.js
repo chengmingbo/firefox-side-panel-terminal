@@ -12,7 +12,6 @@ export const STORAGE_KEYS = Object.freeze({
   theme: "spt.theme",
   scrollback: "spt.scrollback",
   cursorBlink: "spt.cursorBlink",
-  helperPath: "spt.helperPath",
   nativeHostName: "spt.nativeHostName",
 });
 
@@ -27,7 +26,6 @@ export const DEFAULT_FONT_FAMILY =
 export const DEFAULT_THEME = "auto";
 export const DEFAULT_SCROLLBACK = 5000;
 export const DEFAULT_CURSOR_BLINK = true;
-export const DEFAULT_HELPER_PATH = ""; // discovered at install time
 export const DEFAULT_NATIVE_HOST_NAME = "firefox_side_panel_terminal_host";
 
 export async function getConfig() {
@@ -43,7 +41,6 @@ export async function getConfig() {
     theme: stored[STORAGE_KEYS.theme] ?? DEFAULT_THEME,
     scrollback: intOr(stored[STORAGE_KEYS.scrollback], DEFAULT_SCROLLBACK),
     cursorBlink: stored[STORAGE_KEYS.cursorBlink] !== false,
-    helperPath: stored[STORAGE_KEYS.helperPath] ?? DEFAULT_HELPER_PATH,
     nativeHostName:
       stored[STORAGE_KEYS.nativeHostName] ?? DEFAULT_NATIVE_HOST_NAME,
   };
@@ -64,16 +61,13 @@ export function parseEnv(text) {
     const t = line.trim();
     if (!t || t.startsWith("#")) continue;
     const eq = t.indexOf("=");
-    if (eq < 0) continue;
+    if (eq <= 0) continue;
     const k = t.slice(0, eq).trim();
     let v = t.slice(eq + 1).trim();
-    if (
-      (v.startsWith('"') && v.endsWith('"')) ||
-      (v.startsWith("'") && v.endsWith("'"))
-    ) {
+    if (v.length >= 2 && (v[0] === '"' || v[0] === "'") && v.endsWith(v[0])) {
       v = v.slice(1, -1);
     }
-    if (k) out[k] = v;
+    out[k] = v;
   }
   return out;
 }

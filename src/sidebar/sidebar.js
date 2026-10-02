@@ -1,9 +1,16 @@
-// Sidebar controller. Owns the xterm.js Terminal and proxies keystrokes
-// to the background worker via runtime messages. The background worker is
-// the single native messaging client — every Firefox sidebar document and
-// popup would otherwise spawn its own, which native messaging forbids.
+// Sidebar controller. Owns the xterm.js Terminal and a native-messaging port
+// to the PTY helper. Firefox starts one helper process per port, and closing
+// the sidebar closes the port, which makes the helper hang up its shells.
+//
+// Protocol: see helper/main.go. PTY bytes travel as base64 in both
+// directions because they are arbitrary bytes, not valid UTF-16 strings.
 
-import { getConfig, DEFAULT_THEME } from "../common/config.js";
+import {
+  getConfig,
+  parseEnv,
+  STORAGE_KEYS,
+  DEFAULT_THEME,
+} from "../common/config.js";
 
 const els = {
   host: document.getElementById("terminal-host"),
@@ -18,80 +25,89 @@ const els = {
   openOptions: document.getElementById("open-options"),
 };
 
-// xterm.js is loaded as a UMD script that exports window.Terminal / window.FitAddon.
-const Term = window.Terminal;
-const FitAddon = window.FitAddon;
-const WebLinksAddon = window.WebLinksAddon;
+// xterm.js core spreads its exports onto globalThis; each addon UMD bundle
+// exposes a module object, so the class lives one level down.
+const { Terminal } = window;
+const { FitAddon } = window.FitAddon;
+const WebLinksAddon = window.WebLinksAddon?.WebLinksAddon;
+
+const encoder = new TextEncoder();
 
 const state = {
   config: null,
   term: null,
   fit: null,
-  webLinks: null,
+  port: null,
   sessionId: null,
-  sessionCount: 0,
-  connecting: false,
+  pendingId: null, // id sent in "start", until "started" arrives
+  starting: false,
+  windowId: null,
 };
+
+let nextId = 1;
 
 (async function init() {
   state.config = await getConfig();
   applyTheme(state.config.theme);
 
-  state.term = new Term({
+  state.term = new Terminal({
     fontFamily: state.config.fontFamily,
     fontSize: state.config.fontSize,
     cursorBlink: state.config.cursorBlink,
     scrollback: state.config.scrollback,
     theme: xtermTheme(),
-    allowProposedApi: true,
-    convertEol: false,
   });
 
   state.fit = new FitAddon();
   state.term.loadAddon(state.fit);
-
   if (WebLinksAddon) {
-    state.webLinks = new WebLinksAddon();
-    state.term.loadAddon(state.webLinks);
+    state.term.loadAddon(
+      new WebLinksAddon((event, uri) => {
+        event.preventDefault();
+        browser.tabs.create({ url: uri });
+      })
+    );
   }
 
   state.term.open(els.term);
   fitNow();
-  state.term.writeln("\x1b[2mSide Panel Terminal — press Enter to connect.\x1b[0m");
   state.term.onData((data) => {
-    if (!state.sessionId) {
-      // Buffer input until a session is alive.
-      if (data === "\r" || data === "\n") startSession();
-      return;
+    if (state.sessionId) {
+      sendInput(data);
+    } else if (data === "\r" || data === "\n") {
+      startSession();
     }
-    sendInput(data);
   });
-  state.term.focus();
+  state.term.onResize(({ cols, rows }) => {
+    if (state.sessionId) send({ cmd: "resize", id: state.sessionId, cols, rows });
+  });
 
-  const ro = new ResizeObserver(() => fitNow());
-  ro.observe(els.host);
+  new ResizeObserver(() => fitNow()).observe(els.host);
 
-  window.addEventListener("resize", fitNow);
-
-  els.newSession.addEventListener("click", () => startSession());
-  els.reconnect.addEventListener("click", () => reconnect());
+  els.newSession.addEventListener("click", () => restartSession());
+  els.reconnect.addEventListener("click", () => restartSession());
   els.openOptions.addEventListener("click", () =>
     browser.runtime.openOptionsPage()
   );
   els.overlayAction.addEventListener("click", onOverlayAction);
 
   browser.runtime.onMessage.addListener(onRuntimeMessage);
+  browser.storage.onChanged.addListener(onStorageChanged);
+  browser.windows
+    .getCurrent()
+    .then((w) => (state.windowId = w.id))
+    .catch(() => {});
+
+  startSession();
 })();
 
 function applyTheme(theme) {
-  const t = theme || DEFAULT_THEME;
-  document.body.setAttribute("data-theme", t);
+  document.body.setAttribute("data-theme", theme || DEFAULT_THEME);
 }
 
 function xtermTheme() {
-  // Pull a couple of CSS variables so the terminal picks up the sidebar's
-  // chrome. Falls back to a sensible dark scheme when the document is in
-  // auto/light mode (terminals look better dark by default).
+  // Terminals read best dark regardless of the chrome theme; only the cursor
+  // follows the sidebar's accent colour.
   const cs = getComputedStyle(document.body);
   const accent = cs.getPropertyValue("--spt-accent").trim() || "#ff6a00";
   return {
@@ -121,141 +137,201 @@ function xtermTheme() {
 
 function fitNow() {
   try {
-    if (state.fit) state.fit.fit();
+    state.fit?.fit();
   } catch (e) {
-    // ignore — fit may throw during initial layout
+    // fit throws while the sidebar has no layout yet (collapsed, hidden)
   }
 }
 
-async function startSession() {
-  if (state.connecting) return;
-  state.connecting = true;
-  showOverlay("Connecting to native helper…", null, false);
-  setStatus("connecting", "Connecting…");
-  state.term.clear();
-  try {
-    const resp = await browser.runtime.sendMessage({
-      type: "spt/open-session",
-      payload: await sessionOptions(),
-    });
-    if (!resp || !resp.ok) {
-      throw new Error((resp && resp.error) || "Failed to open session.");
+// --- native port ---------------------------------------------------------
+
+function ensurePort() {
+  if (state.port) return state.port;
+  const port = browser.runtime.connectNative(state.config.nativeHostName);
+  port.onMessage.addListener(onHelperMessage);
+  port.onDisconnect.addListener((p) => {
+    if (state.port !== port) return;
+    state.port = null;
+    const hadSession = !!state.sessionId;
+    state.sessionId = null;
+    state.pendingId = null;
+    state.starting = false;
+    const message = p.error?.message || "Native helper exited.";
+    if (hadSession) {
+      state.term.write(`\r\n\x1b[31m[helper disconnected] ${message}\x1b[0m\r\n`);
+      setStatus("disconnected", "disconnected");
+    } else {
+      showOverlay(friendlyError(message), "options");
+      setStatus("error", "error");
     }
-    state.sessionId = resp.sessionId;
-    state.sessionCount++;
-    hideOverlay();
-    setStatus("connected", "connected");
-    fitNow();
+  });
+  state.port = port;
+  return port;
+}
+
+function send(msg) {
+  try {
+    state.port?.postMessage(msg);
   } catch (e) {
-    showOverlay(
-      friendlyError(e && e.message ? e.message : String(e)),
-      "install-helper",
-      true
-    );
-    setStatus("error", "error");
-  } finally {
-    state.connecting = false;
+    // port already gone; onDisconnect reports it
   }
 }
 
-async function sessionOptions() {
-  const cfg = await getConfig();
-  return {
-    cols: state.term.cols,
-    rows: state.term.rows,
-    shell: cfg.shell,
-    cwd: cfg.cwd,
-    env: cfg.env,
-  };
+function startSession() {
+  if (state.starting || state.sessionId) return;
+  state.starting = true;
+  hideOverlay();
+  setStatus("connecting", "connecting…");
+  state.term.reset();
+  fitNow();
+  try {
+    ensurePort();
+    const id = `s${nextId++}`;
+    state.pendingId = id;
+    send({
+      cmd: "start",
+      id,
+      cols: state.term.cols,
+      rows: state.term.rows,
+      shell: state.config.shell,
+      cwd: state.config.cwd,
+      env: parseEnv(state.config.env),
+    });
+  } catch (e) {
+    state.starting = false;
+    showOverlay(friendlyError(e.message || String(e)), "options");
+    setStatus("error", "error");
+  }
+}
+
+function restartSession() {
+  if (state.sessionId) {
+    // Ignore the old session's trailing output and "closed" event.
+    send({ cmd: "stop", id: state.sessionId });
+    state.sessionId = null;
+  }
+  state.starting = false;
+  startSession();
 }
 
 function sendInput(data) {
-  if (!state.sessionId) return;
-  browser.runtime.sendMessage({
-    type: "spt/input",
-    payload: { sessionId: state.sessionId, data },
-  });
+  send({ cmd: "input", id: state.sessionId, data: bytesToBase64(encoder.encode(data)) });
 }
 
-async function onRuntimeMessage(msg) {
+function onHelperMessage(m) {
+  if (!m || !m.evt) return;
+  if (m.id && m.id !== state.sessionId && m.id !== state.pendingId) return;
+  switch (m.evt) {
+    case "started":
+      state.sessionId = m.id;
+      state.pendingId = null;
+      state.starting = false;
+      setStatus("connected", "connected");
+      els.meta.textContent = m.title || "";
+      state.term.focus();
+      // The sidebar may have been resized while the shell was starting.
+      send({ cmd: "resize", id: m.id, cols: state.term.cols, rows: state.term.rows });
+      break;
+    case "output":
+      if (m.id === state.sessionId) state.term.write(base64ToBytes(m.data || ""));
+      break;
+    case "closed":
+      if (m.id !== state.sessionId) return;
+      state.sessionId = null;
+      setStatus("disconnected", "exited");
+      els.meta.textContent = "";
+      state.term.write(
+        `\r\n\x1b[2m[process exited with code ${m.code ?? 0} — press Enter to start a new shell]\x1b[0m\r\n`
+      );
+      break;
+    case "error":
+      if (m.id && m.id === state.pendingId) {
+        // The session never started (bad shell/cwd).
+        state.pendingId = null;
+        state.starting = false;
+        showOverlay(m.message || "Could not start the shell.", "options");
+        setStatus("error", "error");
+      } else {
+        state.term.write(`\r\n\x1b[31m[helper] ${m.message || "error"}\x1b[0m\r\n`);
+      }
+      break;
+  }
+}
+
+// --- messages, settings ---------------------------------------------------
+
+function onRuntimeMessage(msg) {
   if (!msg || !msg.type) return;
-  switch (msg.type) {
-    case "spt/output":
-      if (
-        state.sessionId &&
-        msg.payload &&
-        msg.payload.sessionId === state.sessionId
-      ) {
-        state.term.write(msg.payload.data);
-      }
-      break;
-    case "spt/closed":
-      if (msg.payload && msg.payload.sessionId === state.sessionId) {
-        state.sessionId = null;
-        setStatus("disconnected", "disconnected");
-        state.term.writeln(
-          `\r\n\x1b[2m[connection closed — press Enter to reconnect]\x1b[0m`
-        );
-      }
-      break;
-    case "spt/error":
-      if (msg.payload && msg.payload.sessionId === state.sessionId) {
-        state.term.write(`\r\n\x1b[31m[helper error] ${msg.payload.message}\x1b[0m\r\n`);
-      }
-      break;
-    case "spt/title":
-      if (msg.payload && msg.payload.title) {
-        els.meta.textContent = msg.payload.title;
-      }
-      break;
+  if (msg.windowId != null && state.windowId != null && msg.windowId !== state.windowId) {
+    return;
+  }
+  if (msg.type === "spt/new-session" || msg.type === "spt/reconnect") {
+    restartSession();
   }
 }
 
-async function reconnect() {
-  if (state.sessionId) {
-    await browser.runtime.sendMessage({
-      type: "spt/close-session",
-      payload: { sessionId: state.sessionId },
-    });
-    state.sessionId = null;
-  }
-  startSession();
+async function onStorageChanged(changes, area) {
+  if (area !== "sync") return;
+  state.config = await getConfig();
+  const t = state.term;
+  if (changes[STORAGE_KEYS.theme]) applyTheme(state.config.theme);
+  t.options.fontFamily = state.config.fontFamily;
+  t.options.fontSize = state.config.fontSize;
+  t.options.cursorBlink = state.config.cursorBlink;
+  t.options.scrollback = state.config.scrollback;
+  t.options.theme = xtermTheme();
+  fitNow();
 }
+
+// --- UI helpers -----------------------------------------------------------
 
 function setStatus(stateName, label) {
   els.status.dataset.state = stateName;
   els.status.textContent = label || stateName;
 }
 
-function showOverlay(message, action, showAction) {
+function showOverlay(message, action) {
   els.overlay.hidden = false;
   els.overlayMsg.textContent = message;
-  els.overlayAction.hidden = !showAction;
-  els.overlayAction.textContent =
-    action === "install-helper" ? "Open install instructions" : "Retry";
-  els.overlayAction.dataset.action = action || "";
+  els.overlayAction.hidden = false;
+  els.overlayAction.dataset.action = action || "retry";
+  els.overlayAction.textContent = action === "options" ? "Open settings" : "Retry";
 }
 
 function hideOverlay() {
   els.overlay.hidden = true;
 }
 
-async function onOverlayAction(e) {
-  const action = e.currentTarget.dataset.action;
-  if (action === "install-helper") {
+function onOverlayAction(e) {
+  if (e.currentTarget.dataset.action === "options") {
     browser.runtime.openOptionsPage();
-  } else {
-    hideOverlay();
-    startSession();
   }
+  hideOverlay();
+  startSession();
 }
 
 function friendlyError(msg) {
-  if (/Specified native messaging host not found/i.test(msg)) {
-    return "Native messaging host not found. Open Settings → Install helper to register it with Firefox.";
-  }
-  if (/No such file/i.test(msg) || /not found/i.test(msg)) {
-    return msg + " — open Settings to set the helper path.";
+  if (/native messaging host not found|No such native application/i.test(msg)) {
+    return "The native helper isn't registered with Firefox. Run ./scripts/install.sh from the extension's folder, then press Retry.";
   }
   return msg;
+}
+
+// --- encoding ------------------------------------------------------------
+
+function bytesToBase64(bytes) {
+  if (bytes.toBase64) return bytes.toBase64();
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+function base64ToBytes(b64) {
+  if (Uint8Array.fromBase64) return Uint8Array.fromBase64(b64);
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
