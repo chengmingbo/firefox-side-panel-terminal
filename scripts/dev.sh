@@ -4,18 +4,21 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-if command -v web-ext >/dev/null 2>&1; then
+WEB_EXT="$(command -v web-ext || true)"
+[ -z "$WEB_EXT" ] && [ -x "$ROOT/node_modules/.bin/web-ext" ] && WEB_EXT="$ROOT/node_modules/.bin/web-ext"
+
+if [ -n "$WEB_EXT" ]; then
   cd "$ROOT"
-  exec web-ext run --source-dir "$ROOT/src" \
+  exec "$WEB_EXT" run --source-dir "$ROOT/src" \
     --browser-console \
     --pref "extensions.webextensions.keepStorageOnUninstall=true" \
     "$@"
 fi
 
 cat <<EOF
-web-ext not found on PATH. Install it with:
+web-ext not found. Install it with:
 
-    npm install --global web-ext
+    npm install          # from the repo root
 
 Or do a one-off load:
 

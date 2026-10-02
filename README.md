@@ -16,9 +16,11 @@ Ctrl-C, and cwd persistence all work — it's a terminal, not a web REPL.
 - Keyboard shortcuts:
   - `Alt+Shift+T` — toggle sidebar
   - `Alt+Shift+N` — new session
-  - `Alt+Shift+D` — disconnect / reconnect helper
-- Per-session reconnect. Sessions are independent shells, so the cwd and
-  env of one don't pollute another.
+  - `Alt+Shift+D` — restart the shell
+- One shell per sidebar: each window's sidebar gets its own helper
+  process and shell, so windows never share state. Closing the sidebar
+  hangs up its shell.
+- Settings apply live (font, size, scrollback, cursor blink, theme).
 - Settings page with a "Test connection" button.
 
 ## Install
@@ -34,7 +36,8 @@ cd firefox-side-panel-terminal
 
 `install.sh` will:
 
-1. Build `helper/firefox_side_panel_terminal_host` (requires Go 1.21+).
+1. Build `helper/firefox_side_panel_terminal_host` if it isn't there
+   (requires Go 1.23+, e.g. `brew install go`).
 2. Copy `native/firefox_side_panel_terminal_host.json` to the right
    Firefox native-messaging directory (macOS: `~/Library/Application
    Support/Mozilla/NativeMessagingHosts/`, Linux: `~/.mozilla/native-
@@ -46,11 +49,19 @@ Then load the extension:
 ```sh
 ./scripts/build.sh
 # Firefox → about:debugging → This Firefox → Load Temporary Add-on…
-#   → pick build/side-panel-terminal-0.1.0.xpi
+#   → pick build/side-panel-terminal-0.2.0.xpi
 ```
 
-Restart Firefox. Press **Alt+Shift+T** to open the sidebar. Press
-**Enter** in the terminal pane to spawn a session.
+Restart Firefox after the first `install.sh` so it picks up the helper
+manifest. Press **Alt+Shift+T** to open the sidebar; a shell starts
+automatically. After the shell exits, press **Enter** for a new one.
+
+Temporary add-ons are removed when Firefox restarts. To keep it
+installed without signing, use Firefox Nightly or Developer Edition: set
+`xpinstall.signatures.required` to `false` in `about:config`, then
+`about:addons` → gear → **Install Add-on From File…**. Release Firefox
+needs a signed build (`npx web-ext sign --channel unlisted` with AMO API
+keys).
 
 To uninstall the helper:
 
@@ -62,11 +73,11 @@ To uninstall the helper:
 
 ```
 src/
-├── manifest.json             MV3, sidebar_action, nativeMessaging perm
+├── manifest.json             MV3, sidebar_action, nativeMessaging perm (Firefox 140+)
 ├── _locales/en/messages.json
 ├── sidebar/                  the terminal UI (HTML/CSS/JS)
 ├── options/                  settings page (HTML/CSS/JS)
-├── background/background.js  event page: owns the native messaging port
+├── background/background.js  event page: routes keyboard commands
 ├── common/config.js          shared config (browser.storage.sync)
 ├── styles/common.css         design tokens
 ├── vendor/xterm/             vendored xterm.js UMD bundles
@@ -75,8 +86,8 @@ src/
 helper/                       Go native messaging host
 ├── main.go                   framing + dispatch
 ├── pty_unix.go               creack/pty backend (macOS, Linux, BSD)
-├── smoke_test.go             unit tests (framing, base64, env)
-└── integration_test.go       PTY round-trip (skipped in CI without pty)
+├── host_test.go              framing, env, shell, ping
+└── host_unix_test.go         real PTY session over pipes (resize, exit code, stop)
 
 native/
 └── firefox_side_panel_terminal_host.json  template manifest
@@ -91,23 +102,29 @@ scripts/
 
 ## How it works
 
-- The sidebar is an HTML page that mounts xterm.js. Keystrokes are sent
-  to the background worker via `runtime.sendMessage`.
-- The background worker is the single `browser.runtime.connectNative`
-  endpoint. Firefox only allows one native-messaging port per extension
-  per process, so the worker multiplexes per-session PTYs by `id`.
+- The sidebar is an HTML page that mounts xterm.js and opens its own
+  `browser.runtime.connectNative` port. Firefox starts one helper process
+  per port and closes the helper's stdin when the port goes away, at
+  which point the helper hangs up its shells and exits. (Keeping the port
+  in the MV3 background event page would lose it whenever Firefox
+  suspends the idle page.)
+- The background page only routes the keyboard shortcuts to the sidebar
+  of the window they were pressed in.
 - The Go helper speaks Firefox's native messaging stdio protocol
   (length-prefixed JSON, 4-byte little-endian header) and forwards
   bytes to/from a `creack/pty` master file descriptor.
-- All output is base64-encoded so PTY output (UTF-8 plus arbitrary
-  ANSI/control bytes) survives JSON encoding.
+- PTY bytes are base64-encoded in both directions so arbitrary bytes
+  (partial UTF-8, ANSI/control sequences) survive JSON encoding. The
+  sidebar hands xterm.js raw bytes, which decodes UTF-8 across chunk
+  boundaries.
+- Shells start as login shells (`-l`) so `PATH` is correct even when
+  Firefox was launched from the Dock with a minimal environment.
 
 ## Permissions
 
 - `storage` (sync) — settings.
 - `nativeMessaging` — talk to the Go helper.
-- `clipboardRead`, `clipboardWrite` — copy from the terminal.
-- `notifications` — reserved for future errors.
+- `clipboardWrite` — the settings page's "Copy install command" buttons.
 
 ## Security
 
@@ -115,13 +132,19 @@ The helper runs locally as you. Anything you type into the sidebar is
 sent straight to a shell. Don't load this extension if you don't trust
 the page that's prompting you to install it.
 
+## Development
+
+```sh
+(cd helper && go test -race ./...)   # helper tests, including a real PTY
+npm run lint                          # web-ext lint
+npm run dev                           # web-ext run with live reload
+```
+
 ## Limitations
 
-- Windows uses ConPTY via a stub; PRs welcome.
-- Only one persistent background-worker connection per Firefox process
-  — that's a Firefox limit, not ours.
-- "Temporary" add-ons are removed on Firefox restart. For a permanent
-  install, submit to AMO.
+- Windows (ConPTY) is not implemented yet; PRs welcome.
+- "Temporary" add-ons are removed on Firefox restart; see Install for
+  permanent options.
 
 ## License
 

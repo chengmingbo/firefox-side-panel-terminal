@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "scripts": {
+    "lint": "web-ext lint --source-dir src",
+    "dev": "web-ext run --source-dir src --browser-console --pref extensions.webextensions.keepStorageOnUninstall=true",
+    "build": "./scripts/build.sh",
+    "test": "cd helper && go test -race ./..."
+  },
+  "devDependencies": {
+    "web-ext": "^10.7.0"
+  }
+}

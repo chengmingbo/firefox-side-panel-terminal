@@ -65,11 +65,11 @@ mkdir -p "$TARGET_DIR"
 TARGET="$TARGET_DIR/${NAME}.json"
 
 # Materialise the manifest with the resolved helper path.
-sed "s|/ABSOLUTE/PATH/TO/firefox-side-panel-terminal-host|$HELPER_ABS|" \
+# Escape characters sed treats specially in the replacement.
+HELPER_SED="$(printf '%s' "$HELPER_ABS" | sed 's/[\\|&]/\\&/g')"
+sed "s|/ABSOLUTE/PATH/TO/firefox-side-panel-terminal-host|$HELPER_SED|" \
   "$MANIFEST_TEMPLATE" > "$TARGET"
 
 echo "→ wrote manifest: $TARGET"
 echo
 echo "Restart Firefox, then open the sidebar (Alt+Shift+T)."
-echo "The sidebar will show a 'connecting…' overlay that goes away once"
-echo "the extension finds the helper."
